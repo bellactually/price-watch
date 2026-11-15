@@ -3,6 +3,8 @@ the price, sale status or stock changes. Runs on a timer in GitHub Actions."""
 import json
 import os
 import sys
+import time
+import urllib.error
 import urllib.request
 
 PRODUCT_URL = "https://www.aesop.co.th/en/products/resurrection-rinse-free-hand-mist"
@@ -11,6 +13,8 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 TEST_ALERT = os.environ.get("TEST_ALERT", "").lower() == "true"
 CURRENCY = "THB"
+RETRY_WAITS = [10, 30, 60]   # seconds to wait between attempts within one run
+FAIL_ALERT_AFTER = 3         # consecutive failed runs before the phone is told
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 
@@ -36,7 +40,7 @@ def notify(title, message, priority=3):
     urllib.request.urlopen(req, timeout=20).read()
 
 
-def fetch():
+def fetch_once():
     req = urllib.request.Request(FEED_URL, headers={"User-Agent": UA, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=25) as resp:
         product = json.loads(resp.read().decode("utf-8"))
@@ -48,6 +52,22 @@ def fetch():
         "compare_at_price": cheapest.get("compare_at_price"),
         "available": any(v["available"] for v in variants),
     }
+
+
+def fetch():
+    """Read the product, retrying a few times if the site turns us away."""
+    for attempt, wait in enumerate(RETRY_WAITS + [None], start=1):
+        try:
+            return fetch_once()
+        except Exception as exc:
+            print(f"Attempt {attempt} failed: {exc}")
+            if wait is None:
+                raise
+            if isinstance(exc, urllib.error.HTTPError):
+                retry_after = exc.headers.get("Retry-After", "")
+                if retry_after.isdigit():
+                    wait = min(max(wait, int(retry_after)), 90)
+            time.sleep(wait * float(os.environ.get("WAIT_SCALE", "1")))
 
 
 def load_state():
@@ -74,15 +94,19 @@ def main():
         now = fetch()
     except Exception as exc:  # site blocked us, changed its feed, or is down
         print(f"Fetch failed: {exc}")
-        if old is not None and not old.get("failing"):
+        if old is None:
+            return 1
+        old["fail_count"] = old.get("fail_count", 0) + 1
+        if old["fail_count"] >= FAIL_ALERT_AFTER and not old.get("failing"):
             notify("Price watch can't read the page",
-                   f"The checker failed to read the product page ({exc}). "
+                   f"The last {old['fail_count']} checks failed ({exc}). "
                    "It will keep trying and tell you when it recovers.", 3)
             old["failing"] = True
-            save_state(old)
-        return 0 if old is not None else 1
+        save_state(old)
+        return 0
 
     now["failing"] = False
+    now["fail_count"] = 0
     stock = "in stock" if now["available"] else "sold out"
     summary = f"{now['title']}: {money(now['price'])}, {stock}"
     print(summary)
