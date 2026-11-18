@@ -102,8 +102,12 @@ def read_group(g):
             lid = l2["l2Id"]
             price = res.get("prices", {}).get(lid) or {}
             stock = res.get("stocks", {}).get(lid) or {}
-            base = pick_value(price.get("base"))
-            promo = pick_value(price.get("promo"))
+            # Prices are nested per audience: {"guest": {...}, "member": {...}}.
+            tiers = [price] + [price[k] for k in ("guest", "member") if isinstance(price.get(k), dict)]
+            bases = [b for b in (pick_value(t.get("base")) for t in tiers) if b is not None]
+            promos = [p for p in (pick_value(t.get("promo")) for t in tiers) if p is not None]
+            base = bases[0] if bases else None
+            promo = min(promos) if promos else None
             rows.append({"color": l2["color"]["displayCode"],
                          "size": l2["size"]["displayCode"],
                          "base": base, "promo": promo,
