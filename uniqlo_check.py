@@ -223,11 +223,11 @@ def main():
     today = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=7)
     if TEST_ALERT and not hits:
         notify("Uniqlo watch test",
-               f"Alerts are working. White/Grey not at or under {vnd(CEILING)}. "
-               f"Sale colours now: {summary_sale}.", page01, 3)
+               f"Alerts are working. White and Light Gray are not on sale at or under {vnd(CEILING)} yet.",
+               page01, 3)
     elif not hits and today.weekday() == 0 and state.get("last_health") != today.date().isoformat():
         notify("Uniqlo watch OK",
-               f"White/Grey not at or under {vnd(CEILING)} yet. Sale colours: {summary_sale}.",
+               f"Still running. White and Light Gray are not on sale at or under {vnd(CEILING)} yet.",
                page01, 2)
         state["last_health"] = today.date().isoformat()
 
