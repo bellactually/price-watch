@@ -44,6 +44,26 @@ def notify(title, message, click, priority=3):
     urllib.request.urlopen(req, timeout=20).read()
 
 
+DEBUG_PRICES = [True]
+
+
+def pick_value(p):
+    """Price objects vary: {"value": 391000}, {"value": "391000"}, or a bare number."""
+    if p is None:
+        return None
+    if isinstance(p, (int, float)):
+        return p
+    if isinstance(p, dict):
+        for k in ("value", "amount", "price"):
+            v = p.get(k)
+            if v not in (None, ""):
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
 def get_json(url, client_id):
     headers = {"User-Agent": UA, "Accept": "application/json",
                "Referer": PAGE.format(p=PRODUCT, g="00")}
@@ -73,13 +93,17 @@ def read_group(g):
         if not res or "l2s" not in res:
             last_err = f"no result: {str(data)[:150]} (client id {cid or 'none'})"
             continue
+        if DEBUG_PRICES[0] and res.get("prices"):
+            sample_key = next(iter(res["prices"]))
+            print(f"price sample g{g}: {json.dumps(res['prices'][sample_key])[:400]}")
+            DEBUG_PRICES[0] = False
         rows = []
         for l2 in res["l2s"]:
             lid = l2["l2Id"]
             price = res.get("prices", {}).get(lid) or {}
             stock = res.get("stocks", {}).get(lid) or {}
-            base = (price.get("base") or {}).get("value")
-            promo = (price.get("promo") or {}).get("value")
+            base = pick_value(price.get("base"))
+            promo = pick_value(price.get("promo"))
             rows.append({"color": l2["color"]["displayCode"],
                          "size": l2["size"]["displayCode"],
                          "base": base, "promo": promo,
@@ -104,10 +128,15 @@ def matches(groups):
     hits = []
     for g, rows in groups.items():
         for r in rows:
-            if r["color"] not in WANTED or r["price"] is None:
+            if r["color"] not in WANTED:
                 continue
-            discounted = g != "00" or (r["promo"] and r["base"] and r["promo"] < r["base"])
-            if discounted and r["price"] <= CEILING:
+            on_sale_page = g != "00"
+            promo_on_regular = bool(r["promo"] and r["base"] and r["promo"] < r["base"])
+            if not (on_sale_page or promo_on_regular):
+                continue
+            # A wanted colour on a sale page counts even if the price can't be read,
+            # so a parsing problem can never hide a real sale.
+            if r["price"] is None or r["price"] <= CEILING:
                 hits.append(dict(r, group=g))
     return hits
 
@@ -119,7 +148,10 @@ def sale_colours(groups):
             continue
         for r in rows:
             out.setdefault(r["color"], set()).add(r["price"])
-    return ", ".join(f"{c} {'/'.join(vnd(p) for p in sorted(ps) if p)}" for c, ps in sorted(out.items())) or "none"
+    def fmt(ps):
+        known = sorted(p for p in ps if p is not None)
+        return "/".join(vnd(p) for p in known) if known else "price n/a"
+    return ", ".join(f"{c} {fmt(ps)}" for c, ps in sorted(out.items())) or "none"
 
 
 def load_state():
@@ -166,24 +198,25 @@ def main():
 
     hits = matches(groups)
     summary_sale = sale_colours(groups)
-    print(f"sale colours: {summary_sale}; wanted hits: {len(hits)}")
+    print(f"sale colours: {summary_sale}; wanted hits: {len(hits)}; test_alert={TEST_ALERT} raw={os.environ.get('TEST_ALERT')!r}")
 
     if hits:
-        best = min(hits, key=lambda r: r["price"])
+        best = min(hits, key=lambda r: r["price"] if r["price"] is not None else 0)
         in_stock = sorted({f"{WANTED[r['color']]} {r['size']}" for r in hits
                            if r["stock"] and r["stock"] != "STOCK_OUT"})
         signature = sorted(f"{r['group']}-{r['color']}-{r['size']}-{r['price']}-{r['stock']}" for r in hits)
         link = PAGE.format(p=PRODUCT, g=best["group"]) + f"?colorDisplayCode={best['color']}"
         if signature != state.get("last_hit") or TEST_ALERT:
             stock_txt = ("in stock: " + ", ".join(in_stock)) if in_stock else "all sizes sold out"
-            notify(f"Uniqlo SALE: {WANTED[best['color']]} {vnd(best['price'])}",
-                   f"{NAME} is {vnd(best['price'])} ({stock_txt}). "
+            price_txt = vnd(best["price"]) if best["price"] is not None else "on sale (price not readable, check link)"
+            notify(f"Uniqlo SALE: {WANTED[best['color']]} {price_txt}"[:120],
+                   f"{NAME} is {price_txt} ({stock_txt}). "
                    "Run it past your budget check first.", link, 5)
         state["last_hit"] = signature
     else:
         state["last_hit"] = []
 
-    today = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
+    today = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=7)
     if TEST_ALERT and not hits:
         notify("Uniqlo watch test",
                f"Alerts are working. White/Grey not at or under {vnd(CEILING)}. "
