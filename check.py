@@ -4,12 +4,13 @@ the price, sale status or stock changes. Runs in GitHub Actions.
 LOOP_MINUTES > 0: stay running and check every few minutes for that long
 (used by the scheduled runs, so checks don't depend on GitHub's slow timer).
 LOOP_MINUTES = 0: check once (used by manual test runs)."""
+import base64
 import json
 import os
 import random
-import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 PRODUCT_URL = "https://www.aesop.co.th/en/products/resurrection-rinse-free-hand-mist"
@@ -82,13 +83,32 @@ def save_state(state):
         f.write("\n")
     if SAVE_TO_GIT:
         try:
-            subprocess.run(["git", "add", STATE_FILE], check=True)
-            if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode != 0:
-                subprocess.run(["git", "commit", "-q", "-m", "Update last seen price"], check=True)
-                subprocess.run(["git", "pull", "-q", "--rebase", "origin", "main"], check=True)
-                subprocess.run(["git", "push", "-q"], check=True)
-        except subprocess.CalledProcessError as exc:
+            save_to_github(state)
+        except Exception as exc:
             print(f"Saving to GitHub failed ({exc}); will retry on the next change")
+
+
+def save_to_github(state):
+    """Write state.json to the repo through GitHub's API (no git identity needed)."""
+    api = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+    url = f"{api}/repos/{os.environ['GITHUB_REPOSITORY']}/contents/{STATE_FILE}"
+    headers = {"Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+               "Accept": "application/vnd.github+json", "User-Agent": "price-watch"}
+    sha = None
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url + "?ref=main", headers=headers), timeout=20) as r:
+            sha = json.loads(r.read())["sha"]
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404:
+            raise
+    content = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    body = {"message": "Update last seen price", "branch": "main",
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii")}
+    if sha:
+        body["sha"] = sha
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="PUT",
+                                 headers=dict(headers, **{"Content-Type": "application/json"}))
+    urllib.request.urlopen(req, timeout=20).read()
 
 
 def on_sale(s):
